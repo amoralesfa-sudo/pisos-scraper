@@ -280,7 +280,7 @@ parser.add_argument(
 parser.add_argument(
     "--output",
     type=str,
-    default="dataset/pisos_barcelona.csv",
+    default="../dataset/pisos_barcelona.csv",
     help="Nom del fitxer CSV de sortida (default: dataset/pisos_barcelona.csv)"
 )
 
