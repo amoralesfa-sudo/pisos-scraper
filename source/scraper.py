@@ -5,6 +5,8 @@ import time
 import argparse
 import os
 from datetime import datetime
+import unicodedata
+import re
 
 
 # URL base i punt d'entrada del scraper
@@ -29,6 +31,9 @@ headers = {
 delay_segons = 2
 
 
+# ----------------------------
+# HTTP
+# ----------------------------
 def descarregar_pagina(url):
     """
     Descarrega el contingut HTML d'una URL donada.
@@ -45,8 +50,20 @@ def descarregar_pagina(url):
         resposta = requests.get(url, headers=headers, timeout=10)
         return BeautifulSoup(resposta.content, "html.parser")
 
-    except requests.exceptions.RequestException:
-        pass
+    except Exception as e:
+        print(f"[ERROR] {url}: {e}")
+        return None
+
+
+# ----------------------------
+# UTIL
+# ----------------------------
+def normalitzar(text):
+    text = text.lower()
+    return ''.join(
+        c for c in unicodedata.normalize('NFD', text)
+        if unicodedata.category(c) != 'Mn'
+    ).replace(":", "").strip()
 
 
 def extreure_links_anuncis(soup):
@@ -98,6 +115,38 @@ def extreure_link_seguent_pagina(soup):
 
 
 
+# ----------------------------
+# DETAIL FEATURES
+# ----------------------------
+def extreure_ubicacio_from_url(url):
+    try:
+        # agafem la part del path
+        slug = url.split("pisos.com/alquilar/")[1]
+
+        # traiem el tipus immoble
+        slug = re.sub(r"^(piso|casa|chalet|apartamento|atico|duplex|loft)-", "", slug)
+
+        # eliminem "barcelona_capital"
+        slug = slug.replace("barcelona_capital", "")
+
+        # eliminem el codi postal final si hi és
+        slug = re.sub(r"\d{5}", "", slug)
+
+        # substituïm guions per espais
+        slug = slug.replace("-", " ")
+
+        # substituïm underscores per espais
+        slug = slug.replace("_", " ")
+
+        # neteja espais múltiples
+        slug = " ".join(slug.split())
+
+        return slug.strip()
+
+    except:
+        return ""
+
+
 def extreure_caracteristica(soup, label):
     """
     Funcio per extreure el valor d'una caracteristica concreta
@@ -110,20 +159,23 @@ def extreure_caracteristica(soup, label):
     Returns:
         str: valor de la caracteristica, o buit si no es troba
     """
-    # busquem tots els labels de caracteristiques, amb la info de la inspecció previa
-    labels = soup.find_all("span", class_="features__label")
+    labels     = soup.find_all("span", class_="features__label")
+    label_norm = normalitzar(label)
 
     for l in labels:
-        if label in l.get_text():
-            # com que els dos spans som germans fem servir el find_next_sibling
+        text_label = normalitzar(l.get_text())
+
+        if label_norm == text_label:
             valor = l.find_next_sibling("span", class_="features__value")
             if valor:
-                # afegim el strio=True per eliminar impureses
                 return valor.get_text(strip=True)
 
     return ""
 
 
+# ----------------------------
+# PARSER ANUNCI
+# ----------------------------
 def extreure_dades_anunci(url):
     """
     Accedeix a la fitxa individual d'un anunci i n'extreu totes les dades.
@@ -137,45 +189,41 @@ def extreure_dades_anunci(url):
     soup = descarregar_pagina(url)
     if not soup:
         return None
-
-    # trobem el títol en el h1 corresponent
-    titol_tag = soup.find("h1", class_="detail-info__title")
-    # afegim un if per en cas de que no ho trobi no peti
-    titol = titol_tag.get_text(strip=True) if titol_tag else ""
+    
+    # trobem el títol
+    meta_title = soup.find("meta", property="og:title")
+    titol = " ".join(meta_title.get("content", "").split()) if meta_title else ""
+    
+    # trobem la descripció
+    meta_desc = soup.find("meta", attrs={"name": "description"})
+    descripcio = " ".join(meta_desc.get("content", "").split()) if meta_desc else ""
 
     # trobem el preu a l'atribut data-ad-price del div principal
     contenidor = soup.find("div", attrs={"data-ad-price": True})
-    preu = contenidor.get("data-ad-price") if contenidor else ""
+    preu       = contenidor.get("data-ad-price") if contenidor else ""
 
-    # fem el mateix amb la ubicació
-    ubicacio_tag = soup.find("p", class_="detail-info__subtitle")
-    ubicacio = ubicacio_tag.get_text(strip=True) if ubicacio_tag else ""
+    # retornem una llista amb els valors que volem conservar en ordre
 
-    # fent servir la funció que hem creat abans extrec les característiques lligades al seu tag
-    # ja que tenen totes la mateixa classe
-    sup_construida = extreure_caracteristica(soup, "Superficie construida")
-    sup_util = extreure_caracteristica(soup, "Superficie util")
-    habitacions = extreure_caracteristica(soup, "Habitaciones")
-    banys = extreure_caracteristica(soup, "Banos")
-    planta = extreure_caracteristica(soup, "Planta")
-    referencia = extreure_caracteristica(soup, "Referencia")
-
-    # definim també la data d'extracció per si en un futur volem veure l'evolució
-    data_extraccio = datetime.now().strftime("%Y-%m-%d")
-
-    # retornem una llista amb els valors en ordre
     return [
         url,
         titol,
+        descripcio,
         preu,
-        ubicacio,
-        sup_construida,
-        sup_util,
-        habitacions,
-        banys,
-        planta,
-        referencia,
-        data_extraccio
+        extreure_ubicacio_from_url(url),
+        extreure_caracteristica(soup, "Superficie construida"),
+        extreure_caracteristica(soup, "Superficie útil"),
+        extreure_caracteristica(soup, "Habitaciones"),
+        extreure_caracteristica(soup, "Baños"),
+        extreure_caracteristica(soup, "Planta"),
+        extreure_caracteristica(soup, "Antigüedad"),
+        extreure_caracteristica(soup, "Referencia"),
+        extreure_caracteristica(soup, "Amueblado"),
+        extreure_caracteristica(soup, "Armarios empotrados"),
+        extreure_caracteristica(soup, "Calefacción"),
+        extreure_caracteristica(soup, "Cocina equipada"),
+        extreure_caracteristica(soup, "Ascensor"),
+        extreure_caracteristica(soup, "Terraza"),
+        datetime.now().strftime("%Y-%m-%d")
     ]
 
 
@@ -192,6 +240,7 @@ def guardar_csv(dades, fitxer_sortida):
     capcalera = [
         "url",
         "titol",
+        "descripcio",
         "preu_eur",
         "ubicacio",
         "superficie_construida_m2",
@@ -199,16 +248,26 @@ def guardar_csv(dades, fitxer_sortida):
         "habitacions",
         "banys",
         "planta",
+        "antiguitat_anys",
         "referencia",
+        "moblat",
+        "armaris_empotrats",
+        "calefaccio",
+        "cuina_equipada",
+        "ascensor",
+        "terrassa",
         "data_extraccio"
     ]
+
+    # Creem la carpeta de sortida si no existeix
+    os.makedirs(os.path.dirname(args.output), exist_ok=True)
 
     # guardem el csv amb el csv.writer de forma molt similar als apunts
     with open(fitxer_sortida, "w", newline="", encoding="utf-8") as csvfile:
         writer = csv.writer(csvfile)
         writer.writerow(capcalera)
-        for fila in dades:
-            writer.writerow(fila)
+        writer.writerows(dades)
+    
     #finalment afegeixo informació per saber si ha funcionat o no
     print(f"\nDataset guardat a: {fitxer_sortida}")
     print(f"Total de pisos extrets: {len(dades)}")
@@ -224,14 +283,14 @@ def main(max_pagines, fitxer_sortida):
         fitxer_sortida: nom del fitxer CSV de sortida
     """
     # creo la llista buida per emmagatzemar les dades
-    totes_les_dades = []
+    totes_les_dades   = []
     url_pagina_actual = URL_ENTRADA
-    pagina_num = 1
+    pagina_num        = 1
 
     # bucle principal sota la condició de que la url no sigui none i sigui menor al màxim definit de pàgines
     while url_pagina_actual and pagina_num <= max_pagines:
         # ensenyem per pantalla per quina pagina va el bucle
-        print(f"\n pagina {pagina_num}")
+        print(f"\n Pàgina {pagina_num}")
 
         # descarreguem la pàgina
         soup_llistat = descarregar_pagina(url_pagina_actual)
@@ -266,28 +325,29 @@ def main(max_pagines, fitxer_sortida):
     guardar_csv(totes_les_dades, fitxer_sortida)
 
 
+# ----------------------------
+# CLI
+# ----------------------------
 # mitjançant un parser definim els arguments del script
 # el número de pàgines a scrapear i si volem canviar el nom del output csv
-parser = argparse.ArgumentParser(
-    description="Scraper de pisos en lloguer a Barcelona - pisos.com"
-)
-parser.add_argument(
-    "--max_pagines",
-    type=int,
-    default=3,
-    help="Nombre maxim de pagines a processar (default: 3)"
-)
-parser.add_argument(
-    "--output",
-    type=str,
-    default="../dataset/pisos_barcelona.csv",
-    help="Nom del fitxer CSV de sortida (default: dataset/pisos_barcelona.csv)"
-)
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description="Scraper de pisos en lloguer a Barcelona - pisos.com"
+    )
+    parser.add_argument(
+        "--max_pagines",
+        type=int,
+        default=3,
+        help="Nombre maxim de pagines a processar (default: 3)"
+    )
+    parser.add_argument(
+        "--output",
+        type=str,
+        default="../dataset/pisos_barcelona.csv",
+        help="Nom del fitxer CSV de sortida (default: dataset/pisos_barcelona.csv)"
+    )
 
-args = parser.parse_args()
+    args = parser.parse_args()
 
-# Creem la carpeta de sortida si no existeix
-os.makedirs(os.path.dirname(args.output), exist_ok=True)
-
-# Executem el scraper
-main(args.max_pagines, args.output)
+    # Executem el scraper
+    main(args.max_pagines, args.output)
