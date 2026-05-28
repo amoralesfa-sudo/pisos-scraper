@@ -12,7 +12,7 @@ quins factors influeixen més en el preu del lloguer a Barcelona?
 ## Fitxers
 
 ### Codi
-- `analysis/practica2_pisos_barcelona.Rmd` ---- codi R amb tota la neteja i anàlisi
+- `practica2_pisos_barcelona.Rmd` ---- codi R amb tota la neteja i anàlisi
 
 ### Dataset
 - `dataset/pisos_barcelona_v2.csv` ----  dataset original amb algunes correccions per agafar totes les dades extret de pisos.com
