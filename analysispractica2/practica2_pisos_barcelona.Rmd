@@ -1,0 +1,472 @@
+---
+title: 'Pràctica 2: Tractament del dataset de pisos en lloguer a Barcelona'
+author: "Alexander Morales Fajarnés, Esteve Creus Culell"
+date: "2026-05-26"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
+                      fig.align = "center", fig.width = 6, fig.height = 4)
+```
+
+```{r llibreries}
+library(tidyverse)
+library(corrplot)
+library(randomForest)
+```
+
+---
+
+## Repositori GitHub
+
+https://github.com/amoralesfa-sudo/pisos-scraper/tree/main/analysispractica2
+
+## Vídeo explicatiu
+
+https://drive.google.com/file/d/1BOgVFCaR7lsuzhSkqHmqpEt6ePSqqS8B/view?usp=sharing
+
+
+# 1. Descripció del dataset
+
+El dataset conté 1.201 anuncis de lloguer de pisos a Barcelona extrets de pisos.com el maig de 2026. L'objectiu és identificar quins factors influeixen més en el preu del lloguer.
+
+**Variable objectiu:** `preu_eur` (preu mensual en euros)
+
+Les variables disponibles són: URL, títol, descripció, preu, ubicació, superfície construïda, superfície útil, habitacions, banys, planta, antiguitat, referència, moblat, armaris empotrats, calefacció, cuina equipada, ascensor, terrassa i data d'extracció.
+
+```{r}
+df_brut <- read.csv("C:\\Users\\alexm\\Downloads\\pisos_barcelona_v2.csv")
+summary(df_brut)
+```
+
+---
+
+# 2. Integració i selecció de les dades
+
+Analitzem primer quantes dades falten per variable per decidir quines conservar
+
+```{r}
+# creem un vector buit per guardar el recompte de nulls de cada columna
+buits <- c()
+
+# fem un bucle per iterar cada columna i un contador per contar nulls de la columna
+for (col in names(df_brut)) {
+  n <- 0
+  # fem un altre bucle per iterar amb cada valor de la columna
+  for (val in df_brut[[col]]) {
+    # aqui comprovem si el valor es NA o esta directament buit, 
+    # si es així afegim al contador
+    if (is.na(val) || val == "") {
+      n <- n + 1
+    }
+  }
+  buits[col] <- n
+}
+# finalment ordenem decreixentment per que sigui més visual i clar
+sort(buits, decreasing = TRUE)
+```
+
+Eliminem les variables que al tenir moltissims valors nulls no ens aporten valor a l'anàlisi.A la vegada hi ha paramatres que tampoc ens serveixen per l'anànalisi actual.
+
+Aquestes columnes son: `url`, `titol`, `descripcio`, `referencia`, `data_extraccio`
+
+En quant a columnes majoritariament buides tenim: `ascensor`, `moblat`, `terrassa`, `superficie_util_m2`
+
+
+```{r}
+# filtro el dataset per quedar-me només les columnes que ens interessen
+df <- df_brut[, c("preu_eur", "ubicacio", "superficie_construida_m2",
+                   "habitacions", "banys", "planta", "antiguitat_anys",
+                   "armaris_empotrats", "calefaccio", "cuina_equipada")]
+summary(df)
+```
+
+
+# 3. Neteja de les dades
+
+## 3.1 Zeros, elements buits i valors mancants
+
+Convertim a valors numèrics columnes que arriben com a text, així com algunes per assegurar, ja que hem vist coses estranyes. Necessitem aquest pas per a poder imputar correctament. 
+
+```{r}
+# fem una funció per convertir columnes que arriben com a text a format numèric
+# elimina qualsevol caràcter que no sigui un número o un punt decimal
+netejar_num <- function(x) {
+  as.numeric(str_replace_all(x, "[^0-9.]", ""))
+}
+
+# convertim les columnes numèriques al tipus correcte
+df$preu_eur                 <- as.numeric(df$preu_eur)
+df$superficie_construida_m2 <- netejar_num(df$superficie_construida_m2)
+df$habitacions              <- netejar_num(df$habitacions)
+df$banys                    <- netejar_num(df$banys)
+```
+
+Imputem valors mancants. Per a numèriques fem servir la mediana i per a categòriques la moda:
+
+```{r}
+# fem primer una funció que calcula la moda, primer elimina els NA i els valors buits
+# després crea una taula de freqüències, l'ordena i retorna el primer
+moda <- function(x) {
+  x <- x[!is.na(x) & x != ""]
+  names(sort(table(x), decreasing = TRUE))[1]
+}
+
+# imputació de variables numèriques amb la mediana
+for (v in c("preu_eur", "superficie_construida_m2", "habitacions", "banys")) {
+  # calculem la mediana ignorant els NA
+  med <- median(df[[v]], na.rm = TRUE)
+  # substituïm els NA per la mediana
+  df[[v]][is.na(df[[v]])] <- med
+}
+
+# imputació de variables categòriques amb la moda
+for (v in c("ubicacio", "planta", "antiguitat_anys")) {
+  # calculem la moda
+  m <- moda(df[[v]])
+  # substituïm NA i buits
+  df[[v]][is.na(df[[v]]) | df[[v]] == ""] <- m
+}
+
+# comprovem que no queda cap NA al dataset
+sum(is.na(df))
+```
+
+## 3.2 Tipus de dada de cada atribut
+
+Netegem `ubicacio` (té números i barres al final)
+
+```{r}
+# eliminem el patró " N N/" del final
+df$ubicacio <- gsub("\\s+\\d+\\s+\\d+/$", "", df$ubicacio)
+df$ubicacio <- gsub("^Estudio ", "", df$ubicacio)
+df$ubicacio <- gsub(".*Gracia.*", "Gracia", df$ubicacio)
+df$ubicacio <- gsub(".*Andreu.*", "Sant Andreu", df$ubicacio)
+df$ubicacio <- gsub(".*Sants.*", "Sants", df$ubicacio)
+df$ubicacio <- gsub(".*Horta.*", "Horta", df$ubicacio)
+df$ubicacio <- gsub(".*Poblenou.*", "Poblenou", df$ubicacio)
+df$ubicacio <- gsub(".*Marti.*", "Sant Marti", df$ubicacio)
+df$ubicacio <- gsub(".*Gervasi.*", "Sant Gervasi", df$ubicacio)
+df$ubicacio <- gsub(".*Clot.*", "El Clot", df$ubicacio)
+df$ubicacio <- gsub(".*Ciutat Vella.*", "Ciutat Vella", df$ubicacio)
+df$ubicacio <- gsub(".*0.*", "Altres", df$ubicacio)
+
+# eliminem espais sobrants als extrems
+df$ubicacio <- trimws(df$ubicacio)
+
+# posem la primera lletra de cada paraula en majúscula per unificar valors
+df$ubicacio <- str_to_title(df$ubicacio)
+
+# els barris amb menys de 5 pisos també els posem a Altres
+freq <- table(df$ubicacio)
+df$ubicacio <- ifelse(freq[df$ubicacio] < 5, "Altres",df$ubicacio)
+
+# convertim a factor la columna categòrica
+df$ubicacio <- as.factor(df$ubicacio)
+
+freq <- table(df$ubicacio)
+```
+
+Convertim `planta` a numèric
+
+```{r}
+# convertim planta a numèric assignant un valor a cada categoria
+# creem primer una columna nova plena d'NAs per omplirla
+df$planta_num <- NA
+
+# iterem per cada fila
+for (i in 1:nrow(df)) {
+  # eliminem els espais dels extrems
+  p <- trimws(df$planta[i])
+  # aleshores depenent del valor categoric li assignarem un valor numèric o un altre
+  if (p %in% c("Bajo", "Planta baja")) {
+    df$planta_num[i] <- 0
+  } else if (p %in% c("Entresuelo")) {
+    df$planta_num[i] <- 0.5
+  } else if (p == "Principal") {
+    df$planta_num[i] <- 1
+  # finalment si la variable comença per un numero ens quedarem amb aquest numero
+  } else if (grepl("^[0-9]", p)) {
+    df$planta_num[i] <- as.numeric(gsub("[^0-9]", "", p))
+  }
+}
+
+# imputem els NA amb la mediana
+df$planta_num[is.na(df$planta_num)] <- median(df$planta_num, na.rm = TRUE)
+```
+
+Convertim `antiguitat_anys` a valor numèric
+
+```{r}
+# convertim antiguitat_anys a numèric usant el punt mig de cada rang
+# ho fem de forma molt similar a la planta
+df$antiguitat_num <- NA
+
+for (i in 1:nrow(df)) {
+  if (grepl("Menos de 5", df$antiguitat_anys[i])) {
+    df$antiguitat_num[i] <- 2.5
+  } else if (grepl("Entre 5 y 10", df$antiguitat_anys[i])) {
+    df$antiguitat_num[i] <- 7.5
+  } else if (grepl("Entre 10 y 20", df$antiguitat_anys[i])) {
+    df$antiguitat_num[i] <- 15
+  } else if (grepl("Entre 20 y 30", df$antiguitat_anys[i])) {
+    df$antiguitat_num[i] <- 25
+  } else if (grepl("Entre 30 y 50", df$antiguitat_anys[i])) {
+    df$antiguitat_num[i] <- 40
+  # pels que son més de 50 agafem 60
+  } else if (grepl("Más de 50", df$antiguitat_anys[i])) {
+    df$antiguitat_num[i] <- 60
+  }
+}
+
+# imputem els NA amb la mediana
+df$antiguitat_num[is.na(df$antiguitat_num)] <- median(df$antiguitat_num, na.rm = TRUE)
+```
+
+Convertim variables binàries a Sí/No
+
+```{r}
+# si la cel·la té qualsevol valor no buit significa que és un Sí
+
+df$armaris_bin <- NA
+df$calefaccio_bin <- NA
+df$cuina_bin <- NA
+
+for (i in 1:nrow(df)) {
+  # aqui comprovem si l'string no esta buit
+  # si no esta buit substituim per Sí sino per un No
+  if (trimws(df$armaris_empotrats[i]) != "") {
+    df$armaris_bin[i] <- "Sí"
+  } else {
+    df$armaris_bin[i] <- "No"
+  }
+
+  if (trimws(df$calefaccio[i]) != "") {
+    df$calefaccio_bin[i] <- "Sí"
+  } else {
+    df$calefaccio_bin[i] <- "No"
+  }
+
+  if (trimws(df$cuina_equipada[i]) != "") {
+    df$cuina_bin[i] <- "Sí"
+  } else {
+    df$cuina_bin[i] <- "No"
+  }
+}
+
+# convertim a factor
+df$armaris_bin <- as.factor(df$armaris_bin)
+df$calefaccio_bin <- as.factor(df$calefaccio_bin)
+df$cuina_bin <- as.factor(df$cuina_bin)
+```
+
+## 3.3 Valors extrems
+
+A l'hora de mirar valors extrems hem decidit centar-nos en les variables de preu i superficie construida. En les altres variables numèriques que son habitacions i banys, les variables tenen un rang de valors molt limitat i baix com perque els valors extrems tinguin influencia.
+
+```{r}
+# visualitzem amb boxplot per veure si efectivament hi ha outliers
+boxplot(df$preu_eur, main = "Preu mensual (€)", horizontal = TRUE)
+boxplot(df$superficie_construida_m2, main = "Superfície (m²)", horizontal = TRUE)
+
+# eliminem els registres a més de 3 desviacions estàndard de la mitjana
+for (v in c("preu_eur", "superficie_construida_m2")) {
+  mitja <- mean(df[[v]], na.rm = TRUE)
+  sd_v  <- sd(df[[v]], na.rm = TRUE)
+  # establim la condició que el valor sigui menor o igual al llindar superior 
+  # i major o igual al llindar inferior filtrem el dataframe per mantenir 
+  # només els valors que compleixin aquestes condicions
+  df <- df[df[[v]] <= mitja + 3*sd_v & df[[v]] >= mitja - 3*sd_v, ]
+}
+```
+
+## 3.4 Altres mètodes de neteja
+
+Creem la variable derivada `preu_m2` (preu per metre quadrat), útil per comparar pisos de diferent mida.
+
+```{r}
+# creem una nova columna amb el preu per metre quadrat amb 2 decimals
+df$preu_m2 <- round(df$preu_eur / df$superficie_construida_m2, 2)
+```
+
+---
+
+# 4. Anàlisi de les dades
+
+## 4.1 Model supervisat i no supervisat
+
+### Random Forest (supervisat)
+
+El nostre objectiu és predir el preu del lloguer a partir de les característiques del pis
+
+```{r}
+# seleccionem les variables per al model
+df_rf <- df[, c("preu_eur", "ubicacio", "superficie_construida_m2", "habitacions",
+                "banys", "planta_num", "antiguitat_num",
+                "armaris_bin", "calefaccio_bin", "cuina_bin")]
+
+# dividim les dades en entrenament (80%) i test (20%)
+# seguint el mètode d'exclusió (holdout) dels apunts
+set.seed(42)
+idx   <- sample(1:nrow(df_rf), 0.8 * nrow(df_rf))
+train <- df_rf[idx, ]
+test  <- df_rf[-idx, ]
+
+# entrenem el model Random Forest
+model_rf <- randomForest(preu_eur ~ ., data = train, ntree = 300, importance = TRUE)
+print(model_rf)
+
+# preveiem el preu dels pisos del conjunt de test
+pred <- predict(model_rf, newdata = test)
+
+# avaluem el model amb RMSE i R²
+# RMSE: error mitjà en euros entre el preu real i el predit
+# R²: proporció de la variabilitat del preu explicada pel model
+rmse <- sqrt(mean((pred - test$preu_eur)^2))
+r2   <- cor(pred, test$preu_eur)^2
+cat("RMSE:", round(rmse, 1), "€\n")
+cat("R²  :", round(r2, 3), "\n")
+
+# mostrem la importància de cada variable en el model
+varImpPlot(model_rf, main = "Importància de les variables")
+```
+Resultats:
+
+El model ha sortit relativament bé. Veiem que explica aproximadament el 66% de la variabilitat. L'error mitjà és molt elevat per això, degut a que encara queden alguns valors extrems.
+
+En quant a la importància de les variables es confirma el que ja podiem esperar. Que clarament la variable més important és la superfície construida seguida de la ubicació.
+
+### K-Means (no supervisat)
+
+Agrupem els pisos per veure segments de mercat
+
+```{r}
+# escalem les variables perquè tenen unitats molt 
+# diferents (euros vs metres quadrats vs habitacions)
+df_km <- scale(df[, c("preu_eur", "superficie_construida_m2", "habitacions")])
+
+# Per triar el nombre òptim de clústers busquem el punt 
+# on la inèrcia deixa de baixar significativament
+inertia <- c()
+for (k in 1:8) {
+  km_temp    <- kmeans(df_km, centers = k)
+  inertia[k] <- km_temp$tot.withinss
+}
+plot(1:8, inertia, type = "b",
+     xlab = "Clústers (k)",
+     ylab = "Inèrcia total")
+```
+
+A partir del gràfic observem que a partir de k=5 la inèrcia comença a disminuir de forma menys pronunciada
+
+```{r}
+# apliquem k-means amb k=5
+set.seed(42)
+km     <- kmeans(df_km, centers = 5)
+df$cluster <- factor(km$cluster)
+
+# distribució dels clústers
+print(table(df$cluster))
+
+# perfil de cada clúster
+aggregate(cbind(preu_eur, superficie_construida_m2, habitacions) ~ cluster,
+          data = df, FUN = median)
+
+# visualitzem
+boxplot(preu_eur ~ cluster, data = df,
+        main = "Preu per clúster",
+        xlab = "Clúster", ylab = "€/mes",
+        col  = c("tomato", "steelblue", "seagreen", "orange", "purple"))
+```
+
+El clúster 4 és el més nombrós (512 pisos). Pisos de 3 habitacions bastant econòmics. El clúster 5 per altra banda compta amb bastant menys pisos però amb un preu molt més elevat. Un altre punt curiós és com el clúster 2 té només 1 habitació però té un preu similar al 4. Potser els pisos del clúster 2 son pisos en zones més cèntriques.
+
+## 4.2 Contrast d'hipòtesi
+
+H0 = No hi ha diferència de preu entre pisos amb i sense calefacció  
+H1 = Els pisos amb calefacció són més cars
+
+
+```{r}
+# separem els dos grups
+preu_si <- df$preu_eur[df$calefaccio_bin == "Sí"]
+preu_no <- df$preu_eur[df$calefaccio_bin == "No"]
+
+# comprovem la normalitat amb Shapiro-Wilk
+shapiro.test(preu_si)
+shapiro.test(preu_no)
+```
+Els dos grups tenen p-valor menor a 0.05. Per tant rebutgem la normalitat. Ara passem a comprovar l'homoscedasticitat amb Fligner-Killeen.
+
+```{r}
+fligner.test(preu_eur ~ calefaccio_bin, data = df)
+```
+Aqui també trobem que el p-valor és < a 0.05. Per tant també rebutgem l'homoscedasticitat. Com que no hi ha normalitat ni homoscedasticitat, seguint els apunts apliquem Wilcoxon-Mann-Whitney
+
+```{r}
+wilcox.test(preu_si, preu_no, alternative = "greater")
+```
+El p-valor és menor a 0.05, per tant rebutgem la H0. 
+
+Conclusió: Els pisos amb calefacció tenen un preu de lloguer significativament superior als que no tenen.
+
+# 5. Representació dels resultats
+
+Durant la pràctica hem anat fer representacions gràfiques per ajudar-nos. Ara farem alguna que considerem que falta i pot ser d'ajuda en l'anàlisi
+
+```{r}
+# distribució del preu de lloguer
+hist(df$preu_eur,
+     main   = "Distribució del preu de lloguer",
+     xlab   = "Preu mensual (€)",
+     ylab   = "Freqüència")
+```
+
+Aquest gràfic de distribució de del preu ens permet veure a quin preu es troben la majoria dels pisos. Al voltant de 2.000€.
+
+```{r}
+# correlació entre variables numèriques
+vars_cor <- df[, c("preu_eur", "superficie_construida_m2", "habitacions",
+                   "banys", "planta_num", "antiguitat_num")]
+corrplot(cor(vars_cor), method = "color")
+```
+
+Amb aquesta representació podem veure preu i superfície tenen una correlació alta, per tant quanta més superfície més preu. També tenim el numero d'habitacions i banys.
+
+Trobem també una correlació negativa entre antiguitat i plantes, té lògica ja que els edificis antics solen tenir menys plantes.
+
+
+# 6. Resolució del problema
+
+Els resultats obtinguts permeten respondre parcialment a la pregunta plantejada: quins factors influeixen més en el preu del lloguer a Barcelona.
+
+## Factors principals del preu
+
+La superfície construïda és el factor més determinant, confirmat tant per la matriu de correlació com per la importància de variables del Random Forest. El segon factor més important és la ubicació.
+
+## Model supervisat
+El Random Forest obté un R² de 0.66, explicant el 66% de la variabilitat del preu, amb un error mitjà de 912€. El resultat és moderat perquè falten variables rellevants com la ubicació exacta o l'estat de l'immoble.
+
+## Segments del mercat
+
+K-Means amb k=5 identifica cinc perfils clars: des de pisos econòmics d'1 habitació a 1.650€/mes fins a pisos premium de 215m2 a 6.100€/mes. El segment més nombrós (512 pisos) correspon a pisos de 3 habitacions econòmics.
+
+## Calefacció i preu
+
+El test de Wilcoxon confirma que els pisos amb calefacció tenen un preu significativament superior.
+
+## Limitacions
+
+Variables com ascensor, moblat i terrassa tenien quasi el 100% de valors buits i han hagut de ser eliminades, reduint la capacitat predictiva dels models.
+
+```{r}
+write.csv(df, "pisos_barcelona_final.csv", row.names = FALSE)
+```
+
+| Contribucions        | Signatura       |
+|----------------------|-----------------|
+| Investigació prèvia  | A.M   , E.C.   |
+| Redacció respostes   | A.M   , E.C.   |
+| Desenvolupament codi | A.M   , E.C.   |
+| Participació al vídeo| A.M   , E.C.   |
